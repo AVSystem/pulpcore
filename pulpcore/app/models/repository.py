@@ -198,8 +198,6 @@ class Repository(MasterModel):
                 resource = CreatedResource(content_object=version)
                 resource.save()
 
-            self.invalidate_cache()
-
             return version
 
     def initialize_new_version(self, new_version):
@@ -1499,6 +1497,10 @@ class RepositoryVersion(BaseModel):
                         self.repository.save()
                         self.save()
                         self._compute_counts()
+                    # Only now: until the new version is complete and committed, a request
+                    # is answered from the previous version, and clearing the cache earlier
+                    # would let that answer be cached again and served until it expires.
+                    transaction.on_commit(self.repository.invalidate_cache)
                     self.repository.cleanup_old_versions()
                     repository.on_new_version(self)
             except Exception:
