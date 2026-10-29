@@ -1,11 +1,9 @@
 from time import sleep
 
 import pytest
-from aiohttp.test_utils import make_mocked_request
-from aiohttp.web import Response
 
 import pulpcore.app.redis_connection
-from pulpcore.cache import AsyncContentCache, Cache
+from pulpcore.cache import Cache
 
 
 @pytest.fixture
@@ -109,28 +107,3 @@ def test_clear(pulp_redisdb):
     cache.redis.flushdb()
     for key, _, base_key in tuples:
         assert not cache.exists(key, base_key=base_key)
-
-
-@pytest.mark.asyncio
-async def test_content_cache_keys_on_query_string(pulp_redisdb):
-    """Tests that one path asked with different query strings gets separate entries"""
-
-    @AsyncContentCache(base_key="base")
-    async def handler(request):
-        return Response(text="query: " + request.query_string)
-
-    # Pull-through caching of Python packages serves a wheel and its metadata at one path,
-    # telling them apart only by the upstream URL in the query string.
-    queries = [
-        "",
-        "redirect=https://example.org/a-1.0-py3-none-any.whl",
-        "redirect=https://example.org/a-1.0-py3-none-any.whl.metadata",
-    ]
-    for query in queries:
-        response = await handler(make_mocked_request("GET", "/a-1.0-py3-none-any.whl?" + query))
-        assert response.text == "query: " + query
-        assert response.headers["X-PULP-CACHE"] == "MISS"
-    for query in queries:
-        response = await handler(make_mocked_request("GET", "/a-1.0-py3-none-any.whl?" + query))
-        assert response.text == "query: " + query
-        assert response.headers["X-PULP-CACHE"] == "HIT"

@@ -30,7 +30,6 @@ class CacheKeys(enum.Enum):
     path = "path"
     host = "host"
     method = "method"
-    query = "query"
 
 
 def connection_error_wrapper(func):
@@ -241,7 +240,6 @@ class SyncContentCache(Cache):
             # TODO: this may fail when the host is behind multiple proxies
             # https://docs.djangoproject.com/en/3.2/ref/request-response/
             CacheKeys.host: request.get_host(),
-            CacheKeys.query: request.META.get("QUERY_STRING", ""),
         }
         key = ":".join(all_keys[k] for k in self.keys)
         return key
@@ -327,9 +325,7 @@ class AsyncContentCache(AsyncCache):
                       can be a callable taking the request and cache instance as arguments
             expires_ttl: length in seconds entries should live in the cache, EXPIRES_TTL is default
             keys: a list of CacheKeys to use for key creation upon entry placement,
-                (path, method, query) is default. The query string is part of the key because
-                the response can depend on it: pull-through caching takes the upstream URL from
-                it, so two requests for one path can be for different files.
+                (path, method) is default
             auth: a callable to check authorization of the request; takes the request, cache
                   instance, and base_key as arguments.
         """
@@ -338,7 +334,6 @@ class AsyncContentCache(AsyncCache):
         self.keys = keys or (
             CacheKeys.path,
             CacheKeys.method,
-            CacheKeys.query,
         )
         self.default_expires_ttl = expires_ttl or self.default_expires_ttl
         self.auth = auth
@@ -466,7 +461,6 @@ class AsyncContentCache(AsyncCache):
             CacheKeys.path: request.path,
             CacheKeys.method: request.method,
             CacheKeys.host: request.url.host,
-            CacheKeys.query: request.query_string,
         }
         key = ":".join(all_keys[k] for k in self.keys)
         return key
