@@ -1,0 +1,1 @@
+Fixed the content cache answering a request with the response cached for another query string on the same path, which served a Python package's metadata in place of the package (or the reverse) when both were fetched through pull-through caching.
