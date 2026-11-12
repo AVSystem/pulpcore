@@ -340,6 +340,14 @@ CACHE_SETTINGS = {
     "EXPIRES_TTL": 600,  # 10 minutes
 }
 
+# Content fetched through a remote (pull-through) is added to its repository in one version
+# per this many seconds instead of one version per file. A version costs work in proportion
+# to the size of the repository, so a client fetching thousands of new files through a large
+# cache would otherwise create thousands of them. The pending content is kept in Redis, so
+# this needs Redis (CACHE_ENABLED or the redis worker type); 0, or no Redis, adds every file
+# in a task of its own.
+PULL_THROUGH_BATCH_WINDOW = 0
+
 # The time in seconds a RemoteArtifact will be ignored after failure.
 REMOTE_CONTENT_FETCH_FAILURE_COOLDOWN = 5 * 60  # 5 minutes
 
