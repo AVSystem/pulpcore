@@ -9,6 +9,7 @@ from gettext import gettext as _
 from os import path
 
 import django
+from asgiref.sync import sync_to_async
 from asyncio_throttle import Throttler
 from django.conf import settings
 from django.contrib.postgres.fields import ArrayField, HStoreField
@@ -450,6 +451,12 @@ class Repository(MasterModel):
         if not cpk or already_present.exists():
             return None
 
+        from pulpcore.app.tasks.repository import add_pull_through_pending, batch_pull_through
+
+        if batch_pull_through():
+            add_pull_through_pending(self, cpk)
+            return None
+
         from pulpcore.plugin.tasking import aadd_and_remove, dispatch
 
         body = {"repository_pk": self.pk, "add_content_units": [cpk], "remove_content_units": []}
@@ -461,6 +468,12 @@ class Repository(MasterModel):
             content__pk=cpk, repository=self, version_removed__isnull=True
         )
         if not cpk or await already_present.aexists():
+            return None
+
+        from pulpcore.app.tasks.repository import add_pull_through_pending, batch_pull_through
+
+        if batch_pull_through():
+            await sync_to_async(add_pull_through_pending)(self, cpk)
             return None
 
         from pulpcore.plugin.tasking import aadd_and_remove, adispatch

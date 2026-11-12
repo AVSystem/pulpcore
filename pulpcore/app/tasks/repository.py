@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -6,11 +7,15 @@ from gettext import gettext as _
 from logging import getLogger
 
 from asgiref.sync import sync_to_async
-from django.db import transaction
+from django.conf import settings
+from django.db import connection, transaction
+from django.utils import timezone
 
 from pulpcore.app import models
 from pulpcore.app.models import ProgressReport
-from pulpcore.app.util import get_domain
+from pulpcore.app.redis_connection import get_redis_connection
+from pulpcore.app.util import get_domain, get_prn
+from pulpcore.constants import TASK_STATES
 from pulpcore.exceptions.base import RepositoryVersionDeleteError
 
 log = getLogger(__name__)
@@ -273,3 +278,115 @@ async def aadd_and_remove(
             new_version.add_content(models.Content.objects.filter(pk__in=add_content_units))
 
     await sync_to_async(add_to_repository)()
+
+
+PULL_THROUGH_PENDING_KEY = "pulp:pull-through-pending:{pk}"
+PULL_THROUGH_SCHEDULE = "Add the content pulled through into repository {pk}"
+
+
+def batch_pull_through():
+    """Whether content fetched through a remote is added in batches (PULL_THROUGH_BATCH_WINDOW)."""
+    return bool(settings.PULL_THROUGH_BATCH_WINDOW) and get_redis_connection() is not None
+
+
+def _pull_through_lock_key(repository_pk):
+    """A Postgres advisory lock key for scheduling a repository's pull-through commit."""
+    key = f"pull-through-commit:{repository_pk}"
+    return int(hashlib.sha256(key.encode()).hexdigest()[:15], 16)
+
+
+def add_pull_through_pending(repository, content_pk):
+    """Record content fetched through a remote for the repository's next pull-through batch.
+
+    The content waits in a Redis set per repository; until it is committed, the content app
+    serves it from storage through its remote artifact. Only content new to the set touches
+    the database, to make sure the commit is scheduled.
+    """
+    key = PULL_THROUGH_PENDING_KEY.format(pk=repository.pk)
+    if get_redis_connection().sadd(key, str(content_pk)):
+        schedule_pull_through_commit(repository.pk, repository.pulp_domain_id)
+
+
+def schedule_pull_through_commit(repository_pk, domain_pk):
+    """Make sure a repository's pending pull-through content is committed within the window.
+
+    Each repository has a one-shot task schedule. The first content of a window sets it to
+    fire PULL_THROUGH_BATCH_WINDOW seconds later, and content arriving before it fires is
+    committed with that one. Later content does not move it, so a steady stream still gets a
+    version every window. The schedule waits in the database, so no worker is held for the
+    length of the window.
+    """
+    name = PULL_THROUGH_SCHEDULE.format(pk=repository_pk)
+    due = timezone.now() + datetime.timedelta(seconds=settings.PULL_THROUGH_BATCH_WINDOW)
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s)", [_pull_through_lock_key(repository_pk)]
+            )
+        schedule = models.TaskSchedule.objects.filter(name=name, pulp_domain_id=domain_pk).first()
+        if schedule is None:
+            models.TaskSchedule.objects.create(
+                name=name,
+                task_name=f"{dispatch_pull_through_commit.__module__}."
+                f"{dispatch_pull_through_commit.__name__}",
+                task_kwargs={"repository_pk": str(repository_pk)},
+                next_dispatch=due,
+                dispatch_interval=None,
+                pulp_domain_id=domain_pk,
+            )
+        elif schedule.next_dispatch is None:
+            schedule.next_dispatch = due
+            schedule.save(update_fields=["next_dispatch"])
+
+
+def dispatch_pull_through_commit(repository_pk):
+    """Dispatch the commit of a repository's pending pull-through content.
+
+    Run by the repository's task schedule, which cannot reserve the repository itself. The
+    commit task does, and is dispatched only if none is already waiting to run.
+    """
+    from pulpcore.tasking.tasks import dispatch
+
+    repository = models.Repository.objects.get(pk=repository_pk).cast()
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s)", [_pull_through_lock_key(repository_pk)]
+            )
+        commit_waiting = models.Task.objects.filter(
+            name=f"{commit_pull_through.__module__}.{commit_pull_through.__name__}",
+            state=TASK_STATES.WAITING,
+            reserved_resources_record__contains=[get_prn(repository)],
+        ).exists()
+        if not commit_waiting:
+            dispatch(
+                commit_pull_through,
+                exclusive_resources=[repository],
+                kwargs={"repository_pk": str(repository_pk)},
+            )
+
+
+def commit_pull_through(repository_pk):
+    """Add all pending pull-through content of a repository in one repository version.
+
+    Content fetched while it runs stays pending, and the repository's schedule is set again for
+    it. If adding fails, the content taken is put back, so the next commit tries it again.
+    """
+    redis = get_redis_connection()
+    key = PULL_THROUGH_PENDING_KEY.format(pk=repository_pk)
+    pending = redis.spop(key, redis.scard(key)) or []
+    content_pks = [pk.decode() if isinstance(pk, bytes) else pk for pk in pending]
+    if content_pks:
+        try:
+            add_and_remove(repository_pk, add_content_units=content_pks, remove_content_units=[])
+        except Exception:
+            redis.sadd(key, *content_pks)
+            raise
+        log.info(
+            "Committed pending pull-through content: repository=%s, units=%d",
+            repository_pk,
+            len(content_pks),
+        )
+    if redis.scard(key):
+        repository = models.Repository.objects.get(pk=repository_pk)
+        schedule_pull_through_commit(repository_pk, repository.pulp_domain_id)
