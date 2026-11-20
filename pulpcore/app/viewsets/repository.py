@@ -39,7 +39,7 @@ from pulpcore.app.viewsets.base import (
 )
 from pulpcore.app.viewsets.custom_filters import LabelFilter, WithContentFilter, WithContentInFilter
 from pulpcore.constants import PROTECTED_REPO_VERSION_MESSAGE
-from pulpcore.filters import BaseFilterSet, HyperlinkRelatedFilter
+from pulpcore.filters import BaseFilterSet, HREFInFilter, HyperlinkRelatedFilter
 from pulpcore.tasking.tasks import dispatch
 
 
@@ -179,6 +179,25 @@ class RepositoryViewSet(ImmutableRepositoryViewSet, AsyncUpdateMixin, LabelsMixi
     """
 
 
+class RepositoryVersionHREFInFilter(HREFInFilter):
+    """
+    Filters repository versions by a list of hrefs and PRNs.
+
+    A version href carries the repository and the version number, not the version's primary key,
+    so the generic pk based href filter cannot read it. The filter hands the list to the filter
+    set's ``filter_pulp_href``. It is a filter class rather than a ``method`` binding because
+    django-filter returns the whole queryset before calling a bound method when the list is empty,
+    while an empty list has to select nothing, as it does for every other ``pulp_href__in``.
+    """
+
+    def filter(self, qs, value):
+        if value is None:
+            return qs
+        if not value:
+            return qs.none()
+        return self.parent.filter_pulp_href(qs, self.field_name, value)
+
+
 class RepositoryVersionFilter(BaseFilterSet):
     # e.g.
     # /?number=4
@@ -188,6 +207,7 @@ class RepositoryVersionFilter(BaseFilterSet):
     # /?content=/pulp/api/v3/content/file/fb8ad2d0-03a8-4e36-a209-77763d4ed16c/
     content = WithContentFilter()
     content__in = WithContentInFilter()
+    pulp_href__in = RepositoryVersionHREFInFilter(field_name="pk")
 
     def filter_pulp_href(self, queryset, name, value):
         """Special handling for RepositoryVersion HREF filtering."""
