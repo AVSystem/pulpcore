@@ -183,14 +183,37 @@ def resolve_prn(prn):
 
 
 def resolve_repository_version_href(uri):
-    """Return route parameters from a numbered repository-version href."""
+    """
+    Return the route parameters of a numbered repository-version href.
+
+    The href carries the repository pk and the version number, not the version's primary key. Only
+    these two are read: the plugin segments of the href are not compared with the repository's type.
+
+    Args:
+        uri (str): A repository-version href.
+
+    Returns:
+        dict: The route parameters, ``repository_pk`` as given and ``number`` as an ``int``.
+
+    Raises:
+        rest_framework.exceptions.ValidationError: if the href is not the href of a repository
+            version, its repository pk is not a UUID or its number is not a non-negative integer.
+    """
     try:
-        kwargs = resolve(urlparse(uri).path).kwargs
+        match = resolve(urlparse(uri).path)
     except Resolver404:
         raise ValidationError(detail=_("URI not valid: {u}").format(u=uri))
-    if "repository_pk" not in kwargs or "number" not in kwargs:
+    kwargs = match.kwargs
+    if match.url_name != "versions-detail" or not {"repository_pk", "number"} <= kwargs.keys():
         raise ValidationError(detail=_("URI not valid: {u}").format(u=uri))
-    kwargs["number"] = int(kwargs["number"])
+    number = kwargs["number"]
+    try:
+        UUID(kwargs["repository_pk"])
+    except ValueError:
+        raise ValidationError(detail=_("URI not valid: {u}").format(u=uri))
+    if not (number.isascii() and number.isdecimal()):
+        raise ValidationError(detail=_("URI not valid: {u}").format(u=uri))
+    kwargs["number"] = int(number)
     return kwargs
 
 
